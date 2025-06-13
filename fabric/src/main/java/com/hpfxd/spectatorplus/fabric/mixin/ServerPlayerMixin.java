@@ -19,18 +19,6 @@ import net.minecraft.server.network.ServerGamePacketListenerImpl;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.Relative;
 import net.minecraft.world.entity.player.Player;
-import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Shadow;
-import org.spongepowered.asm.mixin.Unique;
-import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
-
-import com.mojang.authlib.GameProfile; // Added this import
-import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
-import com.hpfxd.spectatorplus.fabric.sync.PlayerInventoryArmorStore; // Moved this import
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.MapItem;
@@ -45,8 +33,19 @@ import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
-
+import com.mojang.authlib.GameProfile;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import com.hpfxd.spectatorplus.fabric.sync.PlayerInventoryArmorStore;
+import net.minecraft.core.NonNullList; // Added NonNullList import
 import java.util.Set;
+import com.hpfxd.spectatorplus.fabric.sync.PlayerInventoryArmorStore; // Ensure this import
+import java.util.Map; // Ensure this import
+import java.util.UUID; // Ensure this import
+import java.util.concurrent.ConcurrentHashMap; // Ensure this import
+import net.minecraft.network.protocol.game.ClientboundContainerSetContentPacket; // Ensure this import
+import net.minecraft.network.protocol.game.ClientboundSetCarriedItemPacket; // Ensure this import
 
 @Mixin(ServerPlayer.class)
 public abstract class ServerPlayerMixin extends Player {
@@ -61,54 +60,58 @@ public abstract class ServerPlayerMixin extends Player {
         super(level, pos, yRot, gameProfile);
     }
 
-    @Inject(method = "setCamera(Lnet/minecraft/world/entity/Entity;)V", at = @At("HEAD"), cancellable = true)
-    private void spectatorplus$restoreInventoryAndArmor(Entity entityToSpectate, CallbackInfo ci) {
+    @Inject(method = "setCamera(Lnet/minecraft/world/entity/Entity;)V", at = @At("HEAD"))
+    private void spectatorplus$manageSpectatorInventory(Entity entityToSpectate, CallbackInfo ci) {
         ServerPlayer spectator = (ServerPlayer) (Object) this;
+        UUID spectatorId = spectator.getUUID();
 
-        // Check if the player is stopping spectating
-        if (entityToSpectate == null || entityToSpectate == spectator) {
-            // Retrieve the saved inventory and armor
-            PlayerInventoryArmorStore savedInventoryArmor = spectatorSavedInventories.get(spectator.getUUID());
+        if (entityToSpectate == null || entityToSpectate == spectator) { // Stopping spectating or spectating self
+            if (spectatorSavedInventories.containsKey(spectatorId)) {
+                PlayerInventoryArmorStore saved = spectatorSavedInventories.remove(spectatorId);
 
-            if (savedInventoryArmor != null) {
-                // Clear the spectator's current inventory and armor
-                spectator.getInventory().clearContent();
+                spectator.getInventory().load(saved.getFullInventory());
 
-                // Restore the original inventory and armor
-                NonNullList<ItemStack> originalInventoryItems = savedInventoryArmor.getInventoryItems();
-                for (int i = 0; i < originalInventoryItems.size(); i++) {
-                    spectator.getInventory().items.set(i, originalInventoryItems.get(i).copy());
-                }
-
-                NonNullList<ItemStack> originalArmorItems = savedInventoryArmor.getArmorItems();
-                for (int i = 0; i < originalArmorItems.size(); i++) {
-                    spectator.getInventory().armor.set(i, originalArmorItems.get(i).copy());
-                }
-
-                // Remove the saved inventory and armor from the map
-                spectatorSavedInventories.remove(spectator.getUUID());
-
-                // Synchronize the changes with the client
-                spectator.connection.send(new net.minecraft.network.protocol.game.ClientboundContainerSetContentPacket(
+                // Send packet to client to update their view
+                spectator.connection.send(new ClientboundContainerSetContentPacket(
                     spectator.containerMenu.containerId,
                     spectator.containerMenu.incrementStateId(),
-                    spectator.getInventory().items,
+                    spectator.getInventory().items, // Main inventory items
                     ItemStack.EMPTY // Carried item
                 ));
             }
-        }
-    }
+        } else if (entityToSpectate instanceof Player && entityToSpectate != spectator) { // Starting to spectate a new player
+            // Save current inventory before it's changed
+            // PlayerInventory.save() creates a new list with all items (main, armor, offhand)
+            NonNullList<ItemStack> currentInventory = NonNullList.withSize(spectator.getInventory().getContainerSize(), ItemStack.EMPTY);
+            spectator.getInventory().save(currentInventory); // Saves into currentInventory
 
-    @Inject(method = "remove(Lnet/minecraft/world/entity/Entity$RemovalReason;)V", at = @At("TAIL"))
-    private void spectatorplus$restoreSpectatorInventoryOnTargetLogout(Entity.RemovalReason reason, CallbackInfo ci) {
-        ServerPlayer removedPlayer = (ServerPlayer) (Object) this;
+            spectatorSavedInventories.put(spectatorId, new PlayerInventoryArmorStore(currentInventory));
 
-        // Iterate over all online players to find who was spectating the removedPlayer
-        for (ServerPlayer onlinePlayer : removedPlayer.getServer().getPlayerList().getPlayers()) {
-            if (onlinePlayer.getCamera() == removedPlayer) {
-                // This onlinePlayer was spectating the player who is now being removed.
-                // Force them to stop spectating, which will trigger inventory restoration.
-                onlinePlayer.setCamera(onlinePlayer); // Spectate self to stop
+            // Now, switch spectator's inventory to target's inventory
+            if (entityToSpectate instanceof ServerPlayer) { // Double check, though outer if implies Player
+                ServerPlayer target = (ServerPlayer) entityToSpectate;
+
+                // Clear spectator's current inventory (main, armor, offhand)
+                spectator.getInventory().clearContent();
+
+                // Copy target's full inventory to spectator
+                NonNullList<ItemStack> targetInventoryCopy = NonNullList.withSize(target.getInventory().getContainerSize(), ItemStack.EMPTY);
+                target.getInventory().save(targetInventoryCopy); // Save target's inventory into the list
+                spectator.getInventory().load(targetInventoryCopy);    // Load this list into spectator's inventory
+
+                // Update client with the new inventory
+                // ClientboundContainerSetContentPacket is already imported
+                spectator.connection.send(new ClientboundContainerSetContentPacket(
+                    spectator.containerMenu.containerId,
+                    spectator.containerMenu.incrementStateId(),
+                    spectator.getInventory().items, // Main inventory items
+                    ItemStack.EMPTY // Carried item
+                ));
+
+                // Sync selected hotbar slot
+                // Ensure ClientboundSetCarriedItemPacket is imported
+                // import net.minecraft.network.protocol.game.ClientboundSetCarriedItemPacket;
+                spectator.connection.send(new net.minecraft.network.protocol.game.ClientboundSetCarriedItemPacket(target.getInventory().selected));
             }
         }
     }
@@ -123,69 +126,29 @@ public abstract class ServerPlayerMixin extends Player {
         ServerSyncController.broadcastPacketToSpectators((ServerPlayer) (Object) this, new ClientboundExperienceSyncPacket(this.getUUID(), this.experienceProgress, this.getXpNeededForNextLevel(), this.experienceLevel));
     }
 
-    @Inject(method = "setCamera(Lnet/minecraft/world/entity/Entity;)V", at = @At("HEAD"))
-    private void spectatorplus$saveInventoryAndArmorWhenStartingToSpectate(Entity entityToSpectate, CallbackInfo ci) { // Renamed to avoid signature clash
+    @Inject(method = "setCamera(Lnet/minecraft/world/entity/Entity;)V", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/network/ServerGamePacketListenerImpl;send(Lnet/minecraft/network/protocol/Packet;)V"))
+    private void spectatorplus$syncAndSwitchInventoryToNewSpectator(Entity entityToSpectate, CallbackInfo ci) {
         ServerPlayer spectator = (ServerPlayer) (Object) this;
 
-        // Check if the player is starting to spectate another player
-        if (entityToSpectate != null && entityToSpectate != spectator) {
-            // Save the player's current inventory and armor
-            PlayerInventoryArmorStore savedInventoryArmor = new PlayerInventoryArmorStore(
-                spectator.getInventory().items,
-                spectator.getInventory().armor
-            );
-            spectatorSavedInventories.put(spectator.getUUID(), savedInventoryArmor);
-        }
-    }
+        // Only proceed if spectating a ServerPlayer and that player is not self
+        if (entityToSpectate instanceof ServerPlayer && entityToSpectate != spectator) {
+            ServerPlayer target = (ServerPlayer) entityToSpectate;
 
-    @Inject(method = "setCamera(Lnet/minecraft/world/entity/Entity;)V", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/network/ServerGamePacketListenerImpl;send(Lnet/minecraft/network/protocol/Packet;)V"))
-    private void spectatorplus$syncAndSwitchInventoryToNewSpectator(Entity entityToSpectate, CallbackInfo ci) { // Renamed to avoid signature clash
-        if (entityToSpectate instanceof final ServerPlayer target) {
-            final ServerPlayer spectator = (ServerPlayer) (Object) this;
+            // ORIGINAL SPECTATORPLUS SYNC LOGIC (NOW DISABLED/COMMENTED)
+            // ServerSyncController.sendPacket(spectator, ClientboundExperienceSyncPacket.initializing(target));
+            // ServerSyncController.sendPacket(spectator, ClientboundFoodSyncPacket.initializing(target));
+            // ServerSyncController.sendPacket(spectator, ClientboundHotbarSyncPacket.initializing(target));
+            // ServerSyncController.sendPacket(spectator, ClientboundSelectedSlotSyncPacket.initializing(target));
 
-            SpectatorPlusFabric.PROXY.onStartSpectating(spectator, entityToSpectate);
-
-            ServerSyncController.sendPacket(spectator, ClientboundExperienceSyncPacket.initializing(target));
-            ServerSyncController.sendPacket(spectator, ClientboundFoodSyncPacket.initializing(target));
-            ServerSyncController.sendPacket(spectator, ClientboundHotbarSyncPacket.initializing(target));
-            ServerSyncController.sendPacket(spectator, ClientboundSelectedSlotSyncPacket.initializing(target));
-
-        // Switch inventory and armor to match the target
-        if (entityToSpectate instanceof ServerPlayer) {
-            ServerPlayer targetPlayer = (ServerPlayer) entityToSpectate;
-
-            // Clear the spectator's inventory and armor
-            spectator.getInventory().clearContent();
-
-            // Copy the target's inventory and armor to the spectator
-            for (int i = 0; i < targetPlayer.getInventory().items.size(); i++) {
-                spectator.getInventory().items.set(i, targetPlayer.getInventory().items.get(i).copy());
-            }
-            for (int i = 0; i < targetPlayer.getInventory().armor.size(); i++) {
-                spectator.getInventory().armor.set(i, targetPlayer.getInventory().armor.get(i).copy());
-            }
-
-            // Synchronize the changes with the client
-            spectator.connection.send(new net.minecraft.network.protocol.game.ClientboundContainerSetContentPacket(
-                spectator.containerMenu.containerId,
-                spectator.containerMenu.incrementStateId(),
-                spectator.getInventory().items,
-                ItemStack.EMPTY // Carried item
-            ));
-        }
-        } else if (this.getCamera() != this && entityToSpectate == this) { // Stopped spectating
-            SpectatorPlusFabric.PROXY.onStopSpectating((ServerPlayer) (Object) this);
-        }
-
-
-            // Send initial map data patch packet if the target has a map in inventory
+            // Send initial map data patch packet if the target has a map in inventory (this was part of original sync)
             for (final ItemStack stack : target.getInventory().items) {
                 if (stack.is(Items.FILLED_MAP)) {
                     final MapId mapId = stack.get(DataComponents.MAP_ID);
-                    final MapItemSavedData mapItemSavedData = MapItem.getSavedData(mapId, this.level());
-
-                    if (mapItemSavedData != null) {
-                        spectator.connection.send(getInitialMapDataPacket(mapId, mapItemSavedData));
+                    if (mapId != null) {
+                        final MapItemSavedData mapItemSavedData = MapItem.getSavedData(mapId, spectator.level());
+                        if (mapItemSavedData != null) {
+                            spectator.connection.send(getInitialMapDataPacket(mapId, mapItemSavedData));
+                        }
                     }
                 }
             }
@@ -237,6 +200,25 @@ public abstract class ServerPlayerMixin extends Player {
             }
 
             this.setCamera(entity);
+        }
+    }
+
+    @Inject(method = "disconnect()V", at = @At("TAIL"))
+    private void spectatorplus$handleDisconnect(CallbackInfo ci) {
+        ServerPlayer disconnectingPlayer = (ServerPlayer) (Object) this;
+        UUID disconnectingPlayerId = disconnectingPlayer.getUUID();
+
+        if (spectatorSavedInventories.containsKey(disconnectingPlayerId)) {
+            PlayerInventoryArmorStore saved = spectatorSavedInventories.remove(disconnectingPlayerId);
+            disconnectingPlayer.getInventory().load(saved.getFullInventory());
+        }
+
+        if (disconnectingPlayer.getServer() != null) {
+            for (ServerPlayer onlinePlayer : disconnectingPlayer.getServer().getPlayerList().getPlayers()) {
+                if (onlinePlayer.getCamera() == disconnectingPlayer) {
+                    onlinePlayer.setCamera(onlinePlayer);
+                }
+            }
         }
     }
 }

@@ -1,29 +1,20 @@
 package com.hpfxd.spectatorplus.fabric.sync;
 
-import net.minecraft.world.item.ItemStack;
 import net.minecraft.core.NonNullList;
+import net.minecraft.world.item.ItemStack;
 
 public class PlayerInventoryArmorStore {
-    private final NonNullList<ItemStack> inventoryItems;
-    private final NonNullList<ItemStack> armorItems;
+    private final NonNullList<ItemStack> fullInventory;
 
-    public PlayerInventoryArmorStore(NonNullList<ItemStack> inventoryItems, NonNullList<ItemStack> armorItems) {
-        this.inventoryItems = NonNullList.withSize(inventoryItems.size(), ItemStack.EMPTY);
-        for (int i = 0; i < inventoryItems.size(); i++) {
-            this.inventoryItems.set(i, inventoryItems.get(i).copy());
-        }
-
-        this.armorItems = NonNullList.withSize(armorItems.size(), ItemStack.EMPTY);
-        for (int i = 0; i < armorItems.size(); i++) {
-            this.armorItems.set(i, armorItems.get(i).copy());
+    public PlayerInventoryArmorStore(NonNullList<ItemStack> fullInventory) {
+        // Deep copy the list to prevent modifications to the original
+        this.fullInventory = NonNullList.withSize(fullInventory.size(), ItemStack.EMPTY);
+        for (int i = 0; i < fullInventory.size(); i++) {
+            this.fullInventory.set(i, fullInventory.get(i).copy());
         }
     }
 
-    public NonNullList<ItemStack> getInventoryItems() {
-        return inventoryItems;
-    }
-
-    public NonNullList<ItemStack> getArmorItems() {
-        return armorItems;
+    public NonNullList<ItemStack> getFullInventory() {
+        return this.fullInventory;
     }
 }
